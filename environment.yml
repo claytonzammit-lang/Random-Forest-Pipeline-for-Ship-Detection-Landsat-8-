@@ -1,0 +1,14 @@
+name: ship-detection-rf
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - rasterio
+  - scikit-learn
+  - joblib
+  - opencv
+  - fiona
+  - geopandas
+  - shapely
+  - pyproj
