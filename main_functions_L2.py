@@ -607,14 +607,13 @@ def train_rf_from_tiled_scenes2(
     
     joblib.dump(rf, "rf_ship_detector.pkl")
     
-
     return rf, metrics, info
 
 def detect_ships_with_rf(
     comp_tif_path: str,
     model_path: str = "rf_ship_detector.pkl",
     *,
-    prob_threshold: float = 0.5,
+    prob_threshold: float = 0.95,
     out_ship_mask_path: Optional[str] = None,
     out_prob_path: Optional[str] = None,
     profile: bool = True,
@@ -631,7 +630,11 @@ def detect_ships_with_rf(
     It loads the trained RF model from disk, applies it per pixel, and produces:
         - a binary ship mask (0 = water, 1 = ship)
         - a probability map (P(ship) per pixel)
-        - an optional metrics dict with runtime & memory usage
+        - a metrics dict with runtime & memory usage
+
+    The function ALWAYS writes two GeoTIFFs to disk:
+        - a uint8 ship mask
+        - a float32 probability raster
 
     PARAMETERS
     ----------
@@ -648,17 +651,20 @@ def detect_ships_with_rf(
         otherwise 0 (water). Default is 0.5.
 
     out_ship_mask_path : str or None, optional
-        If provided, the binary ship mask will be written to this path as a
-        single-band GeoTIFF (uint8). If None, no file is written.
+        Output path for the binary ship mask GeoTIFF (uint8).
+        If None, a filename is derived from `comp_tif_path`, e.g.:
+            "<base>_ship_mask.tif"
 
     out_prob_path : str or None, optional
-        If provided, the ship probability map will be written to this path as a
-        single-band GeoTIFF (float32). If None, no file is written.
+        Output path for the ship probability GeoTIFF (float32).
+        If None, a filename is derived from `comp_tif_path`, e.g.:
+            "<base>_ship_prob.tif"
 
     profile : bool, optional
         If True, measure wall-clock runtime and peak Python memory usage using
         `time.perf_counter` and `tracemalloc`. Metrics are returned in a dict.
-        If False, metrics are still returned but with zeros. Default is True.
+        If False, metrics are still returned but with memory usage set to 0.
+        Default is True.
 
     RETURNS
     -------
@@ -681,7 +687,7 @@ def detect_ships_with_rf(
     -----
     • Any pixel with non-finite features (NaN/Inf in any band) is treated as
       invalid and set to ship_prob = 0.0, ship_mask = 0.
-    • Geo-referencing (transform, CRS) is preserved in any outputs written.
+    • Geo-referencing (transform, CRS) is preserved in the output rasters.
     """
 
     # ---- Optional profiling start ----
@@ -728,18 +734,29 @@ def detect_ships_with_rf(
     ship_prob = ship_prob_flat.reshape(H, W)
     ship_mask = ship_mask_flat.reshape(H, W)
 
-    # ---- Optional: write outputs ----
-    if out_ship_mask_path is not None:
-        mask_profile = profile_r.copy()
-        mask_profile.update(dtype="uint8", count=1, nodata=0)
-        with rasterio.open(out_ship_mask_path, "w", **mask_profile) as dst:
-            dst.write(ship_mask, 1)
+    # ---- Derive default output paths if not provided ----
+    scene_name = os.path.splitext(os.path.basename(comp_tif_path))[0]
+    base, _ = os.path.splitext(comp_tif_path)
+    folder_L2 = os.path.dirname(os.path.dirname(base))
+    results_path = f"{folder_L2}/RF_Results/{scene_name}"
+    os.makedirs(results_path, exist_ok=True)
+    if out_ship_mask_path is None:
+        out_ship_mask_path = f"{results_path}/{scene_name}_ship_mask.tif"
+    if out_prob_path is None:
+        out_prob_path = f"{results_path}/{scene_name}_ship_prob.tif"
 
-    if out_prob_path is not None:
-        prob_profile = profile_r.copy()
-        prob_profile.update(dtype="float32", count=1, nodata=0.0)
-        with rasterio.open(out_prob_path, "w", **prob_profile) as dst:
-            dst.write(ship_prob, 1)
+    # ---- Always write outputs ----
+    # Ship mask
+    mask_profile = profile_r.copy()
+    mask_profile.update(dtype="uint8", count=1, nodata=0)
+    with rasterio.open(out_ship_mask_path, "w", **mask_profile) as dst:
+        dst.write(ship_mask, 1)
+
+    # Probability map
+    prob_profile = profile_r.copy()
+    prob_profile.update(dtype="float32", count=1, nodata=0.0)
+    with rasterio.open(out_prob_path, "w", **prob_profile) as dst:
+        dst.write(ship_prob, 1)
 
     # ---- Finish profiling ----
     runtime_sec = time.perf_counter() - t0
