@@ -132,3 +132,7 @@ The results are two raster images:
 The trained Random Forest model (185 MB) is available here:
 
 [Download from Google Drive] (https://drive.google.com/file/d/1XSNjG1070Qqyp5DoD9F4n3mClL9gIre8/view?usp=drive_link)
+
+6 thermal composite images (4gb) can be downloaded from here:
+
+[Download from Google Drive] (https://drive.google.com/drive/folders/1PP95EsZVtpa0nESK1IIAJyFTIaac9_2j?usp=drive_link)
