@@ -116,6 +116,17 @@ This produces a dataset with a 1:5 ship-to-water ratio.
 | **Weighted Avg** | 0.95 | 0.93 | 0.94 | 668526 |
 
 ---
+
+## Running the model
+
+To run the model the same input features for the training must be used
+
+The results are two raster images:
+
+- A binary mask where 1 represents ship and 0 represents non-ship
+- A ship probablity mask
+
+---
 ### Download Model
 
 The trained Random Forest model (185 MB) is available here:
