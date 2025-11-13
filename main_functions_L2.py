@@ -9,6 +9,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import f1_score, make_scorer
+from typing import Tuple, Optional
 from aux_functions_L2 import thermal_conversion, shapefile_mask, std_func, gradient_magnitude, relabel_tiles_with_all_ships_from_paths, clip_raster_by_rect_buffer, temperature_aware_cloud_mask_local
 
 def TC_images_all(directory_path, land_shapefile_path):
@@ -604,4 +605,131 @@ def train_rf_from_tiled_scenes2(
     
     joblib.dump(rf, "rf_ship_detector.pkl")
     
+
     return rf, metrics, info
+
+def detect_ships_with_rf(
+    comp_tif_path: str,
+    model_path: str = "rf_ship_detector.pkl",
+    *,
+    prob_threshold: float = 0.5,
+    out_ship_mask_path: Optional[str] = None,
+    out_prob_path: Optional[str] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Run ship detection on a thermal composite image using a pre-trained Random Forest.
+
+    This function expects the same input features that were used for training:
+        Band 1: mean-centered thermal (e.g. BT10 - local sea mean)
+        Band 2: local standard deviation (texture)
+        Band 3: gradient magnitude
+
+    It loads the trained RF model from disk, applies it per pixel, and produces:
+        - a binary ship mask (0 = water, 1 = ship)
+        - a probability map (P(ship) per pixel)
+
+    PARAMETERS
+    ----------
+    comp_tif_path : str
+        Path to the 3-band thermal composite GeoTIFF created by the preprocessing pipeline.
+
+    model_path : str, optional
+        Path to the saved RandomForest model (joblib/pickle file).
+        Default is "rf_ship_detector.pkl".
+
+    prob_threshold : float, optional
+        Probability threshold for classifying a pixel as ship.
+        Pixels with P(ship) >= prob_threshold are labeled as 1 (ship), otherwise 0 (water).
+        Default is 0.5.
+
+    out_ship_mask_path : str or None, optional
+        If provided, the binary ship mask will be written to this path as a single-band
+        GeoTIFF (uint8). If None, the file is not saved. Default is None.
+
+    out_prob_path : str or None, optional
+        If provided, the ship probability map will be written to this path as a single-band
+        GeoTIFF (float32). If None, the file is not saved. Default is None.
+
+    RETURNS
+    -------
+    ship_mask : np.ndarray
+        2D uint8 array of shape (H, W), where 1 = ship, 0 = water.
+
+    ship_prob : np.ndarray
+        2D float32 array of shape (H, W), containing P(ship) for each pixel.
+        Non-finite or invalid input pixels are assigned probability 0.0 by default.
+
+    NOTES
+    -----
+    • The function preserves the georeferencing (transform, CRS, etc.) when writing
+      output GeoTIFFs.
+    • Any pixel that contains non-finite feature values (NaN/Inf in any band) is treated
+      as invalid and is forced to:
+          ship_mask = 0
+          ship_prob = 0.0
+    """
+
+    # ---- Load model ----
+    rf = joblib.load(model_path)
+
+    # ---- Read composite image (C, H, W) ----
+    with rasterio.open(comp_tif_path) as src:
+        comp = src.read(out_dtype="float32")  # shape: (C, H, W)
+        profile = src.profile.copy()
+
+    if comp.ndim != 3 or comp.shape[0] < 3:
+        raise ValueError(
+            f"Expected a 3-band composite (C,H,W), got shape {comp.shape}"
+        )
+
+    # Move channels to last axis: (H, W, C)
+    comp = np.moveaxis(comp, 0, -1)  # (H, W, C)
+    H, W, C = comp.shape
+
+    # Flatten to (N, C)
+    X_flat = comp.reshape(-1, C)
+
+    # Valid pixels = all finite features
+    valid = np.isfinite(X_flat).all(axis=1)
+
+    # Prepare outputs
+    ship_prob_flat = np.zeros(X_flat.shape[0], dtype=np.float32)
+    ship_mask_flat = np.zeros(X_flat.shape[0], dtype=np.uint8)
+
+    # Only predict on valid pixels
+    if valid.any():
+        X_valid = X_flat[valid]
+
+        # predict_proba returns [:, 1] = probability of class "1" (ship)
+        proba_valid = rf.predict_proba(X_valid)[:, 1].astype(np.float32)
+        ship_prob_flat[valid] = proba_valid
+        ship_mask_flat[valid] = (proba_valid >= prob_threshold).astype(np.uint8)
+
+    # Reshape back to (H, W)
+    ship_prob = ship_prob_flat.reshape(H, W)
+    ship_mask = ship_mask_flat.reshape(H, W)
+
+    # ---- Optional: write outputs to GeoTIFF ----
+    # Ship mask
+    if out_ship_mask_path is not None:
+        mask_profile = profile.copy()
+        mask_profile.update(
+            dtype="uint8",
+            count=1,
+            nodata=0,  # 0 = water / no ship
+        )
+        with rasterio.open(out_ship_mask_path, "w", **mask_profile) as dst:
+            dst.write(ship_mask, 1)
+
+    # Probability map
+    if out_prob_path is not None:
+        prob_profile = profile.copy()
+        prob_profile.update(
+            dtype="float32",
+            count=1,
+            nodata=0.0,
+        )
+        with rasterio.open(out_prob_path, "w", **prob_profile) as dst:
+            dst.write(ship_prob, 1)
+
+    return ship_mask, ship_prob
