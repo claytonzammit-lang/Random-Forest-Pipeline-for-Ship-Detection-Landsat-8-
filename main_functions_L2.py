@@ -4,6 +4,8 @@ import xml.etree.ElementTree as ET
 import os
 import glob
 import joblib
+import tracemalloc
+import time
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
@@ -615,23 +617,26 @@ def detect_ships_with_rf(
     prob_threshold: float = 0.5,
     out_ship_mask_path: Optional[str] = None,
     out_prob_path: Optional[str] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    profile: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
     """
-    Run ship detection on a thermal composite image using a pre-trained Random Forest.
+    Run ship detection on a thermal composite image using a pre-trained RF,
+    optionally measuring runtime and memory usage.
 
     This function expects the same input features that were used for training:
-        Band 1: mean-centered thermal (e.g. BT10 - local sea mean)
+        Band 1: mean-centered thermal (e.g., BT10 - local sea mean)
         Band 2: local standard deviation (texture)
         Band 3: gradient magnitude
 
     It loads the trained RF model from disk, applies it per pixel, and produces:
         - a binary ship mask (0 = water, 1 = ship)
         - a probability map (P(ship) per pixel)
+        - an optional metrics dict with runtime & memory usage
 
     PARAMETERS
     ----------
     comp_tif_path : str
-        Path to the 3-band thermal composite GeoTIFF created by the preprocessing pipeline.
+        Path to the 3-band thermal composite GeoTIFF.
 
     model_path : str, optional
         Path to the saved RandomForest model (joblib/pickle file).
@@ -639,16 +644,21 @@ def detect_ships_with_rf(
 
     prob_threshold : float, optional
         Probability threshold for classifying a pixel as ship.
-        Pixels with P(ship) >= prob_threshold are labeled as 1 (ship), otherwise 0 (water).
-        Default is 0.5.
+        Pixels with P(ship) >= prob_threshold are labeled as 1 (ship),
+        otherwise 0 (water). Default is 0.5.
 
     out_ship_mask_path : str or None, optional
-        If provided, the binary ship mask will be written to this path as a single-band
-        GeoTIFF (uint8). If None, the file is not saved. Default is None.
+        If provided, the binary ship mask will be written to this path as a
+        single-band GeoTIFF (uint8). If None, no file is written.
 
     out_prob_path : str or None, optional
-        If provided, the ship probability map will be written to this path as a single-band
-        GeoTIFF (float32). If None, the file is not saved. Default is None.
+        If provided, the ship probability map will be written to this path as a
+        single-band GeoTIFF (float32). If None, no file is written.
+
+    profile : bool, optional
+        If True, measure wall-clock runtime and peak Python memory usage using
+        `time.perf_counter` and `tracemalloc`. Metrics are returned in a dict.
+        If False, metrics are still returned but with zeros. Default is True.
 
     RETURNS
     -------
@@ -657,32 +667,43 @@ def detect_ships_with_rf(
 
     ship_prob : np.ndarray
         2D float32 array of shape (H, W), containing P(ship) for each pixel.
-        Non-finite or invalid input pixels are assigned probability 0.0 by default.
+
+    metrics : dict
+        Dictionary with performance and image info:
+            - "runtime_sec"
+            - "peak_memory_mb"
+            - "width"
+            - "height"
+            - "n_pixels"
+            - "n_bands"
 
     NOTES
     -----
-    • The function preserves the georeferencing (transform, CRS, etc.) when writing
-      output GeoTIFFs.
-    • Any pixel that contains non-finite feature values (NaN/Inf in any band) is treated
-      as invalid and is forced to:
-          ship_mask = 0
-          ship_prob = 0.0
+    • Any pixel with non-finite features (NaN/Inf in any band) is treated as
+      invalid and set to ship_prob = 0.0, ship_mask = 0.
+    • Geo-referencing (transform, CRS) is preserved in any outputs written.
     """
+
+    # ---- Optional profiling start ----
+    if profile:
+        tracemalloc.start()
+        t0 = time.perf_counter()
+    else:
+        t0 = time.perf_counter()  # still measure elapsed time, but no memory
 
     # ---- Load model ----
     rf = joblib.load(model_path)
 
     # ---- Read composite image (C, H, W) ----
     with rasterio.open(comp_tif_path) as src:
-        comp = src.read(out_dtype="float32")  # shape: (C, H, W)
-        profile = src.profile.copy()
+        comp = src.read(out_dtype="float32")  # (C, H, W)
+        profile_r = src.profile.copy()
+        width, height, n_bands = src.width, src.height, src.count
 
     if comp.ndim != 3 or comp.shape[0] < 3:
-        raise ValueError(
-            f"Expected a 3-band composite (C,H,W), got shape {comp.shape}"
-        )
+        raise ValueError(f"Expected a 3-band composite (C,H,W), got shape {comp.shape}")
 
-    # Move channels to last axis: (H, W, C)
+    # Move channels last: (H, W, C)
     comp = np.moveaxis(comp, 0, -1)  # (H, W, C)
     H, W, C = comp.shape
 
@@ -696,11 +717,9 @@ def detect_ships_with_rf(
     ship_prob_flat = np.zeros(X_flat.shape[0], dtype=np.float32)
     ship_mask_flat = np.zeros(X_flat.shape[0], dtype=np.uint8)
 
-    # Only predict on valid pixels
+    # Predict only on valid pixels
     if valid.any():
         X_valid = X_flat[valid]
-
-        # predict_proba returns [:, 1] = probability of class "1" (ship)
         proba_valid = rf.predict_proba(X_valid)[:, 1].astype(np.float32)
         ship_prob_flat[valid] = proba_valid
         ship_mask_flat[valid] = (proba_valid >= prob_threshold).astype(np.uint8)
@@ -709,27 +728,36 @@ def detect_ships_with_rf(
     ship_prob = ship_prob_flat.reshape(H, W)
     ship_mask = ship_mask_flat.reshape(H, W)
 
-    # ---- Optional: write outputs to GeoTIFF ----
-    # Ship mask
+    # ---- Optional: write outputs ----
     if out_ship_mask_path is not None:
-        mask_profile = profile.copy()
-        mask_profile.update(
-            dtype="uint8",
-            count=1,
-            nodata=0,  # 0 = water / no ship
-        )
+        mask_profile = profile_r.copy()
+        mask_profile.update(dtype="uint8", count=1, nodata=0)
         with rasterio.open(out_ship_mask_path, "w", **mask_profile) as dst:
             dst.write(ship_mask, 1)
 
-    # Probability map
     if out_prob_path is not None:
-        prob_profile = profile.copy()
-        prob_profile.update(
-            dtype="float32",
-            count=1,
-            nodata=0.0,
-        )
+        prob_profile = profile_r.copy()
+        prob_profile.update(dtype="float32", count=1, nodata=0.0)
         with rasterio.open(out_prob_path, "w", **prob_profile) as dst:
             dst.write(ship_prob, 1)
 
-    return ship_mask, ship_prob
+    # ---- Finish profiling ----
+    runtime_sec = time.perf_counter() - t0
+
+    if profile:
+        current_bytes, peak_bytes = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        peak_mb = peak_bytes / (1024 ** 2)
+    else:
+        peak_mb = 0.0
+
+    metrics = {
+        "runtime_sec": runtime_sec,
+        "peak_memory_mb": peak_mb,
+        "width": width,
+        "height": height,
+        "n_pixels": width * height,
+        "n_bands": n_bands,
+    }
+
+    return ship_mask, ship_prob, metrics
