@@ -116,4 +116,8 @@ This produces a dataset with a 1:5 ship-to-water ratio.
 | **Weighted Avg** | 0.95 | 0.93 | 0.94 | 668526 |
 
 ---
+### Download Model
 
+The trained Random Forest model (185 MB) is available here:
+
+[Download from Google Drive] (https://drive.google.com/file/d/1XSNjG1070Qqyp5DoD9F4n3mClL9gIre8/view?usp=drive_link)
