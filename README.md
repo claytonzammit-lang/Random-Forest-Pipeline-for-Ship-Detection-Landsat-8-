@@ -1,12 +1,12 @@
 # Random Forest Ship Detection — Landsat 8 Thermal Pipeline
 
-This repository contains a full pipeline to train a Random Forest (RF) model for ship detection using Landsat 8 Band 10 thermal imagery. The workflow covers preprocessing, feature extraction, labeling, tiling, and model training.
+This repository contains a full pipeline of how this Random Forest (RF) model for ship detection using Landsat 8 Band 10 thermal imagery was trained. The workflow covers preprocessing, feature extraction, labeling, tiling, and model training.
 
 ---
 
 ## Required Files per Scene
 
-Each Landsat scene requires the following files (L1 or L2 products work, but L2 is recommended):
+Each Landsat L2 scene requires the following files:
 
 - Landsat 8 Band 10 (thermal infrared)
 - MTL metadata file (XML format)
