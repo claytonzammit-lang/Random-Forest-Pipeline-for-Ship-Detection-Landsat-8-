@@ -73,7 +73,7 @@ def shapefile_mask(
     tif_path,
     *,
     all_touched=True,
-    coast_buffer_px=0.5,
+    coast_buffer_px=5,
     use_true_footprint=True,
     do_vector_clip=True
 ):
@@ -588,5 +588,6 @@ def relabel_tiles_with_all_ships_from_paths(
             dtype="uint8"
         )
         masks.append(mask)
+
 
     return masks, arrays
